@@ -1,26 +1,15 @@
-import asyncio
-from mcp_agent.core.fastagent import FastAgent
+import wrapt
+import inspect
 from mcp_agent.mcp.mcp_aggregator import MCPAggregator
 
-# Global or instance-level log container
 tool_log = []
 
-class LoggingAggregator(MCPAggregator):
-    async def call_tool(self, name, arguments, *args, **kwargs):
-        tool_log.append((name, arguments))
-        return await super().call_tool(name, arguments, *args, **kwargs)
+@wrapt.decorator
+async def log_call_tool_async(wrapped, instance, args, kwargs):
+    name = args[0] if args else kwargs.get("name")
+    arguments = args[1] if len(args) > 1 else kwargs.get("arguments")
+    tool_log.append((name, arguments))
+    return await wrapped(*args, **kwargs)
 
-# Monkey-patch MCPAggregator used internally (if subclass injection is not possible)
-MCPAggregator.call_tool = LoggingAggregator.call_tool
-
-fast = FastAgent("example")
-
-@fast.agent(instruction="You are a helpful agent who can access tools")
-async def main():
-    async with fast.run() as agent:
-        res = await agent.send("Some query here…")
-        print("Result:", res)
-        print("Tool usage:", tool_log)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# Apply to the method
+MCPAggregator.call_tool = log_call_tool_async(MCPAggregator.call_tool)
