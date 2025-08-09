@@ -1,26 +1,10 @@
-class LoggingAgent:
-    def __init__(self, agent):
-        self.agent = agent
-        self.log = []
+import wrapt
 
-    async def send(self, message):
-        original = self.agent.send
-        self.agent.send = self._wrapped_send
-        res = await original(message)
-        self.agent.send = original
-        return res
+@wrapt.decorator
+def log_convert(wrapped, instance, args, kwargs):
+    event = args[0] if args else kwargs.get("event")
+    print("convert_log_event called with event:", event)
+    return wrapped(*args, **kwargs)
 
-    async def _wrapped_send(self, message, *args, **kwargs):
-        response = await self.agent.send(message, *args, **kwargs)
-        # If agent exposes message history, inspect for tool usage
-        return response
-
-# Usage
-@fast.agent(...)
-async def main():
-    async with fast.run() as agent:
-        wrapped = LoggingAgent(agent)
-        res = await wrapped.send("hello")
-        print("Got:", res)
-        # If tool metadata is stored in message_history:
-        print("History:", agent.message_history)
+from mcp_agent.event_progress import convert_log_event
+convert_log_event = log_convert(convert_log_event)
