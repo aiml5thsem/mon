@@ -1,0 +1,26 @@
+class LoggingAgent:
+    def __init__(self, agent):
+        self.agent = agent
+        self.log = []
+
+    async def send(self, message):
+        original = self.agent.send
+        self.agent.send = self._wrapped_send
+        res = await original(message)
+        self.agent.send = original
+        return res
+
+    async def _wrapped_send(self, message, *args, **kwargs):
+        response = await self.agent.send(message, *args, **kwargs)
+        # If agent exposes message history, inspect for tool usage
+        return response
+
+# Usage
+@fast.agent(...)
+async def main():
+    async with fast.run() as agent:
+        wrapped = LoggingAgent(agent)
+        res = await wrapped.send("hello")
+        print("Got:", res)
+        # If tool metadata is stored in message_history:
+        print("History:", agent.message_history)
