@@ -1,28 +1,9 @@
-import streamlit as st
-import requests
+from mcp_agent.mcp.mcp_aggregator import MCPAggregator
 
-st.set_page_config(page_title="Fast-Agent UI", page_icon="🤖", layout="centered")
+orig_call_tool = MCPAggregator.call_tool
 
-st.title("💬 Fast-Agent MCP UI")
-user_input = st.text_input("Enter your message:", "")
+async def wrapped_call_tool(self, name, arguments, *args, **kwargs):
+    my_log_list.append((name, arguments))
+    return await orig_call_tool(self, name, arguments, *args, **kwargs)
 
-if st.button("Send") and user_input.strip():
-    with st.spinner("Talking to agent..."):
-        try:
-            response = requests.post(
-                "http://localhost:8001/mcp",
-                json={"input": user_input},
-                timeout=60
-            )
-            data = response.json()
-            st.subheader("Agent Response")
-            st.write(data.get("reply", "No reply found."))
-
-            tools = data.get("tools_used", [])
-            if tools:
-                st.subheader("🛠 Tools Used")
-                for t in tools:
-                    st.write(f"- {t}")
-
-        except Exception as e:
-            st.error(f"Error: {e}")
+MCPAggregator.call_tool = wrapped_call_tool
