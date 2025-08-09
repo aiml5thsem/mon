@@ -1,0 +1,12 @@
+from mcp_agent.mcp.mcp_aggregator import MCPAggregator
+
+tool_log = []
+orig_call = MCPAggregator.call_tool
+
+async def wrapped_call_tool(self, name, arguments, *args, **kwargs):
+    tool_log.append((name, arguments))
+    return await orig_call(self, name, arguments, *args, **kwargs)
+
+MCPAggregator.call_tool = wrapped_call_tool
+
+# Your existing FastAgent setup follows
