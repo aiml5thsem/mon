@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tab Recorder</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        #container {
+            text-align: center;
+        }
+        button {
+            font-size: 18px;
+            padding: 10px 20px;
+            margin: 10px;
+            cursor: pointer;
+        }
+        #status, #tabName, #recordingTime {
+            margin-top: 20px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <button id="startButton">Start Recording</button>
+        <button id="pauseButton" disabled>Pause Recording</button>
+        <button id="resumeButton" disabled>Resume Recording</button>
+        <button id="stopButton" disabled>Stop Recording</button>
+        <div id="status"></div>
+        <div id="tabName"></div>
+        <div id="recordingTime"></div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let recordingStream;
+        let startTime;
+        let timerInterval;
+        let tabLabel = '';
+
+        function updateRecordingTime() {
+            const currentTime = new Date().getTime();
+            const elapsedTime = new Date(currentTime - startTime);
+            const hours = elapsedTime.getUTCHours().toString().padStart(2, '0');
+            const minutes = elapsedTime.getUTCMinutes().toString().padStart(2, '0');
+            const seconds = elapsedTime.getUTCSeconds().toString().padStart(2, '0');
+            document.getElementById('recordingTime').textContent = `Recording Time: ${hours}:${minutes}:${seconds}`;
+        }
+
+        function sanitizeFilename(name) {
+            return name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        }
+
+        async function startRecording() {
+            try {
+                document.getElementById('status').textContent = 'Waiting for tab selection...';
+
+                recordingStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { displaySurface: "browser" },
+                    audio: true,
+                });
+
+                // Get the tab name
+                const track = recordingStream.getVideoTracks()[0];
+                tabLabel = track.label;
+                document.getElementById('tabName').textContent = `Recording: ${tabLabel}`;
+
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    recordingStream.addTrack(audioStream.getAudioTracks()[0]);
+                } catch (e) {
+                    console.warn('Unable to capture audio. Recording will proceed without audio:', e);
+                }
+
+                mediaRecorder = new MediaRecorder(recordingStream, { mimeType: 'video/webm' });
+                const chunks = [];
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        chunks.push(e.data);
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    const filename = sanitizeFilename(tabLabel) || 'tab_recording';
+                    a.download = `${filename}_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.webm`;
+                    document.body.appendChild(a);
+                    a.click();
+                    
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                        window.URL.revokeObjectURL(url);
+                    }, 100);
+
+                    recordingStream.getTracks().forEach(track => track.stop());
+                    clearInterval(timerInterval);
+
+                    document.getElementById('status').textContent = 'Recording finished and downloaded.';
+                    document.getElementById('startButton').disabled = false;
+                    document.getElementById('pauseButton').disabled = true;
+                    document.getElementById('resumeButton').disabled = true;
+                    document.getElementById('stopButton').disabled = true;
+                    document.getElementById('tabName').textContent = '';
+                    document.getElementById('recordingTime').textContent = '';
+                };
+
+                mediaRecorder.start();
+                startTime = new Date().getTime();
+                timerInterval = setInterval(updateRecordingTime, 1000);
+
+                document.getElementById('status').textContent = 'Recording in progress...';
+                document.getElementById('startButton').disabled = true;
+                document.getElementById('pauseButton').disabled = false;
+                document.getElementById('stopButton').disabled = false;
+
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                document.getElementById('status').textContent = 'Error: ' + error.message;
+                document.getElementById('startButton').disabled = false;
+            }
+        }
+
+        function pauseRecording() {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.pause();
+                clearInterval(timerInterval);
+                document.getElementById('status').textContent = 'Recording paused.';
+                document.getElementById('pauseButton').disabled = true;
+                document.getElementById('resumeButton').disabled = false;
+            }
+        }
+
+        function resumeRecording() {
+            if (mediaRecorder && mediaRecorder.state === 'paused') {
+                mediaRecorder.resume();
+                startTime = new Date().getTime(); // Restart the timer
+                timerInterval = setInterval(updateRecordingTime, 1000);
+                document.getElementById('status').textContent = 'Recording resumed.';
+                document.getElementById('pauseButton').disabled = false;
+                document.getElementById('resumeButton').disabled = true;
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                clearInterval(timerInterval);
+                console.log('Recording stopped.');
+            }
+        }
+
+        document.getElementById('startButton').addEventListener('click', startRecording);
+        document.getElementById('pauseButton').addEventListener('click', pauseRecording);
+        document.getElementById('resumeButton').addEventListener('click', resumeRecording);
+        document.getElementById('stopButton').addEventListener('click', stopRecording);
+    </script>
+</body>
+</html>
