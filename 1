@@ -1,15 +1,92 @@
-import wrapt
-import inspect
-from mcp_agent.mcp.mcp_aggregator import MCPAggregator
+import threading
+import queue
+import time
+import numpy as np
+import whisper
+import speech_recognition as sr
 
-tool_log = []
+# ---------------------------
+# Configuration
+# ---------------------------
+MODEL_NAME = "base"         # Whisper model
+LANGUAGE = "fr"            # 'auto', 'fr', 'de', etc.
+PAUSE_THRESHOLD = 0.5       # silence detection (seconds)
+ENERGY_THRESHOLD = 250       # microphone sensitivity
+MAX_PHRASE_TIME = 10          # seconds max per phrase
 
-@wrapt.decorator
-async def log_call_tool_async(wrapped, instance, args, kwargs):
-    name = args[0] if args else kwargs.get("name")
-    arguments = args[1] if len(args) > 1 else kwargs.get("arguments")
-    tool_log.append((name, arguments))
-    return await wrapped(*args, **kwargs)
+# ---------------------------
+# Initialization
+# ---------------------------
+print("Loading Whisper model (small, CPU)...")
+model = whisper.load_model(MODEL_NAME)
+print("✅ Model loaded successfully")
 
-# Apply to the method
-MCPAggregator.call_tool = log_call_tool_async(MCPAggregator.call_tool)
+recognizer = sr.Recognizer()
+recognizer.energy_threshold = ENERGY_THRESHOLD
+recognizer.pause_threshold = PAUSE_THRESHOLD
+recognizer.dynamic_energy_threshold = True
+
+audio_queue = queue.Queue()
+stop_event = threading.Event()
+
+# ---------------------------
+# Worker thread for processing
+# ---------------------------
+def transcriber_worker():
+    while not stop_event.is_set():
+        try:
+            audio_data = audio_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        try:
+            wav_bytes = audio_data.get_wav_data()
+            audio_array = np.frombuffer(wav_bytes, np.int16).astype(np.float32) / 32768.0
+
+            # Translate using Whisper
+            result = model.transcribe(
+                audio_array,
+                task="translate",
+                language=None if LANGUAGE == "auto" else LANGUAGE,
+                fp16=False
+            )
+            text = result["text"].strip()
+            if text:
+                print(f"\n🗣️  English Translation: {text}\n")
+        except Exception as e:
+            print(f"[Error while processing chunk] {e}")
+
+# ---------------------------
+# Continuous listening function
+# ---------------------------
+def listen_continuously():
+    with sr.Microphone(sample_rate=16000) as source:
+        print("\n🎙️  Listening continuously... (Ctrl+C to stop)\n")
+        while not stop_event.is_set():
+            try:
+                audio_data = recognizer.listen(source, phrase_time_limit=MAX_PHRASE_TIME)
+                audio_queue.put(audio_data)
+            except Exception as e:
+                print(f"[Listening Error] {e}")
+
+# ---------------------------
+# Start threads
+# ---------------------------
+listener_thread = threading.Thread(target=listen_continuously, daemon=True)
+worker_thread = threading.Thread(target=transcriber_worker, daemon=True)
+
+listener_thread.start()
+worker_thread.start()
+
+# ---------------------------
+# Keep main thread alive
+# ---------------------------
+try:
+    while True:
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    print("\n🛑 Stopping...")
+    stop_event.set()
+    listener_thread.join()
+    worker_thread.join()
+    print("✅ Exited cleanly.")
