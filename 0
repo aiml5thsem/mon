@@ -1,142 +1,93 @@
-import gradio as gr
-import numpy as np
 import whisper
-import torch
-import torchaudio
-from io import BytesIO
-import tempfile
-import os
+import speech_recognition as sr
+import numpy as np
+import threading
+import queue
+import time
 
-# Load Whisper base model
-whisper_model = whisper.load_model("base")
+# ---------------------------
+# CONFIGURATION
+# ---------------------------
+MODEL_NAME = "small"
+LANGUAGE = "auto"  # or "fr", "de"
+PAUSE_THRESHOLD = 0.6   # seconds of silence before chunk ends
+ENERGY_THRESHOLD = 300   # mic sensitivity
+PHRASE_TIMEOUT = 8       # max seconds per phrase
 
-# Load Silero VAD model
-vad_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=True)
-torch.set_num_threads(1)  # CPU optimization
+# ---------------------------
+# INITIALIZE
+# ---------------------------
+print("Loading Whisper model (small, CPU)...")
+model = whisper.load_model(MODEL_NAME)
+print("✅ Model loaded successfully\n")
 
-def transcribe(audio_buffer, display_text, chunk, language, silence_count):
-    """
-    Processes new audio chunk with VAD:
-    - Detects speech; appends only if voiced.
-    - Runs Whisper on full voiced buffer.
-    - Resets buffer on prolonged silence.
-    - Appends only new text.
-    """
-    if chunk is None:
-        return audio_buffer, display_text, silence_count
-    
-    sr, data = chunk
-    
-    # Normalize and convert to mono float32
-    if data.ndim > 1:
-        data = np.mean(data, axis=1)
-    data = data.astype(np.float32)
-    if np.max(np.abs(data)) > 0:
-        data /= np.max(np.abs(data))
-    
-    # Resample to 16kHz if needed (prevents format issues)
-    if sr != 16000:
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        data = resampler(torch.from_numpy(data).float()).numpy()
-        sr = 16000
-    
-    # VAD on chunk
-    data_tensor = torch.from_numpy(data).float().unsqueeze(0)  # Batch dim
-    speech_prob = vad_model(data_tensor)[0].item()
-    
-    # Map language
-    lang_map = {"auto-detect": None, "french": "fr", "german": "de"}
-    lang_code = lang_map.get(language, None)
-    
-    new_text = ""
-    updated_silence = silence_count
-    
-    if speech_prob > 0.5:
-        # Speech detected: append to buffer and reset silence
-        updated_silence = 0
-        if audio_buffer is None:
-            audio_buffer = data
-        else:
-            audio_buffer = np.concatenate((audio_buffer, data))
-        
-        # Transcribe full voiced buffer if >1s (~16000 samples)
-        if len(audio_buffer) > 16000:
+recognizer = sr.Recognizer()
+recognizer.energy_threshold = ENERGY_THRESHOLD
+recognizer.pause_threshold = PAUSE_THRESHOLD
+recognizer.dynamic_energy_threshold = True
+
+audio_queue = queue.Queue()
+stop_event = threading.Event()
+
+# ---------------------------
+# WORKER — Transcribe chunks
+# ---------------------------
+def transcribe_worker():
+    while not stop_event.is_set():
+        try:
+            audio_data = audio_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            wav_bytes = audio_data.get_wav_data(convert_rate=16000)
+            audio_np = np.frombuffer(wav_bytes, np.int16).astype(np.float32) / 32768.0
+            result = model.transcribe(
+                audio_np,
+                task="translate",
+                language=None if LANGUAGE == "auto" else LANGUAGE,
+                fp16=False
+            )
+            text = result["text"].strip()
+            if text:
+                print(f"🗣️ English Translation: {text}\n")
+        except Exception as e:
+            print(f"[Error while transcribing] {e}")
+
+# ---------------------------
+# LISTENER — Capture audio continuously
+# ---------------------------
+def listen_continuously():
+    with sr.Microphone(sample_rate=16000) as source:
+        print("🎙️ Listening continuously... (Ctrl+C to stop)\n")
+        while not stop_event.is_set():
             try:
-                # Ensure 16kHz for Whisper
-                result = whisper_model.transcribe(
-                    audio_buffer,
-                    language=lang_code,
-                    task="translate",
-                    fp16=False  # CPU-safe
+                audio_data = recognizer.listen(
+                    source,
+                    timeout=None,
+                    phrase_time_limit=PHRASE_TIMEOUT
                 )
-                full_transcript = result["text"].strip()
-                
-                # Diff for new text only
-                if display_text and full_transcript.startswith(display_text):
-                    new_text = full_transcript[len(display_text):].strip()
-                else:
-                    new_text = full_transcript
-                
-                # Keep buffer for context (trim to last 30s to manage memory)
-                if len(audio_buffer) > 16000 * 30:
-                    audio_buffer = audio_buffer[-16000 * 30:]
+                audio_queue.put(audio_data)
             except Exception as e:
-                print(f"Whisper error (skipping chunk): {e}")  # Silent fail, continue
-    else:
-        # Silence: increment count
-        updated_silence += 1
-        if updated_silence > 5:  # ~2.5s silence at 0.5s chunks
-            audio_buffer = None
-            updated_silence = 0
-    
-    # Append new text
-    if new_text:
-        updated_display = (display_text + (" " if display_text else "") + new_text).strip()
-    else:
-        updated_display = display_text
-    
-    return audio_buffer, updated_display, updated_silence
+                print(f"[Listening error] {e}")
 
-# Gradio Interface
-with gr.Blocks(title="Real-Time Translator with VAD") as demo:
-    gr.Markdown("# Real-Time Speech Translator (Whisper + Silero VAD)")
-    gr.Markdown("Live English translation from auto-detect/French/German. Pauses on silence for efficiency. Click mic and speak continuously—text updates in real-time.")
-    
-    with gr.Row():
-        language_dropdown = gr.Dropdown(
-            choices=["auto-detect", "french", "german"],
-            value="auto-detect",
-            label="Source Language",
-            interactive=True
-        )
-    
-    audio_input = gr.Audio(
-        sources="microphone",
-        type="numpy",
-        streaming=True,
-        label="Click and speak here (continuous listening)..."
-    )
-    
-    output_text = gr.Textbox(
-        label="English Translation (Live)",
-        lines=10,
-        placeholder="Start speaking—translation appears live...",
-        interactive=False
-    )
-    
-    # Hidden states
-    audio_state = gr.State(value=None)
-    text_state = gr.State(value="")
-    silence_state = gr.State(value=0)
-    
-    # Update on new chunk (live streaming)
-    audio_input.change(
-        fn=transcribe,
-        inputs=[audio_state, text_state, audio_input, language_dropdown, silence_state],
-        outputs=[audio_state, text_state, silence_state, output_text]
-    )
-    
-    gr.Markdown("**Tips:** Grant mic access. For real-time flow, speak clearly; updates every ~0.5s. If error persists, check FFmpeg install.")
+# ---------------------------
+# START THREADS
+# ---------------------------
+listen_thread = threading.Thread(target=listen_continuously, daemon=True)
+worker_thread = threading.Thread(target=transcribe_worker, daemon=True)
 
-if __name__ == "__main__":
-    demo.launch()
+listen_thread.start()
+worker_thread.start()
+
+# ---------------------------
+# MAIN LOOP
+# ---------------------------
+try:
+    while True:
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    print("\n🛑 Stopping...")
+    stop_event.set()
+    listen_thread.join()
+    worker_thread.join()
+    print("✅ Exited cleanly.")
