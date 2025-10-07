@@ -1,0 +1,93 @@
+import whisper
+import speech_recognition as sr
+import numpy as np
+import threading
+import queue
+import time
+
+# ---------------------------
+# CONFIGURATION
+# ---------------------------
+MODEL_NAME = "small"
+LANGUAGE = "auto"  # or "fr", "de"
+PAUSE_THRESHOLD = 0.6   # seconds of silence before chunk ends
+ENERGY_THRESHOLD = 300   # mic sensitivity
+PHRASE_TIMEOUT = 8       # max seconds per phrase
+
+# ---------------------------
+# INITIALIZE
+# ---------------------------
+print("Loading Whisper model (small, CPU)...")
+model = whisper.load_model(MODEL_NAME)
+print("✅ Model loaded successfully\n")
+
+recognizer = sr.Recognizer()
+recognizer.energy_threshold = ENERGY_THRESHOLD
+recognizer.pause_threshold = PAUSE_THRESHOLD
+recognizer.dynamic_energy_threshold = True
+
+audio_queue = queue.Queue()
+stop_event = threading.Event()
+
+# ---------------------------
+# WORKER — Transcribe chunks
+# ---------------------------
+def transcribe_worker():
+    while not stop_event.is_set():
+        try:
+            audio_data = audio_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            wav_bytes = audio_data.get_wav_data(convert_rate=16000)
+            audio_np = np.frombuffer(wav_bytes, np.int16).astype(np.float32) / 32768.0
+            result = model.transcribe(
+                audio_np,
+                task="translate",
+                language=None if LANGUAGE == "auto" else LANGUAGE,
+                fp16=False
+            )
+            text = result["text"].strip()
+            if text:
+                print(f"🗣️ English Translation: {text}\n")
+        except Exception as e:
+            print(f"[Error while transcribing] {e}")
+
+# ---------------------------
+# LISTENER — Capture audio continuously
+# ---------------------------
+def listen_continuously():
+    with sr.Microphone(sample_rate=16000) as source:
+        print("🎙️ Listening continuously... (Ctrl+C to stop)\n")
+        while not stop_event.is_set():
+            try:
+                audio_data = recognizer.listen(
+                    source,
+                    timeout=None,
+                    phrase_time_limit=PHRASE_TIMEOUT
+                )
+                audio_queue.put(audio_data)
+            except Exception as e:
+                print(f"[Listening error] {e}")
+
+# ---------------------------
+# START THREADS
+# ---------------------------
+listen_thread = threading.Thread(target=listen_continuously, daemon=True)
+worker_thread = threading.Thread(target=transcribe_worker, daemon=True)
+
+listen_thread.start()
+worker_thread.start()
+
+# ---------------------------
+# MAIN LOOP
+# ---------------------------
+try:
+    while True:
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    print("\n🛑 Stopping...")
+    stop_event.set()
+    listen_thread.join()
+    worker_thread.join()
+    print("✅ Exited cleanly.")

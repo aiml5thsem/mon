@@ -1,0 +1,97 @@
+import sounddevice as sd
+import numpy as np
+import webrtcvad
+import whisper
+import queue, threading, time
+
+# ---------------- CONFIG ----------------
+SAMPLE_RATE = 16000
+FRAME_DURATION = 30        # ms per frame for VAD
+LANGUAGE = "auto"
+MODEL_NAME = "small"
+
+# ---------------- INIT ----------------
+print("Loading Whisper model (small, CPU)...")
+model = whisper.load_model(MODEL_NAME)
+print("✅ Model loaded successfully\n")
+
+vad = webrtcvad.Vad(2)  # 0=aggressive(sensitive) .. 3=least sensitive
+audio_queue = queue.Queue()
+stop_event = threading.Event()
+
+# ---------------- RECORD LOOP ----------------
+def record_loop():
+    """Continuously record and push real speech segments."""
+    print("🎙️ Listening (Ctrl+C to stop)...\n")
+    buffer = np.zeros(0, dtype=np.float32)
+    speech_active = False
+    silence_frames = 0
+    max_silence_frames = int(0.5 / (FRAME_DURATION / 1000))  # 0.5s silence
+
+    def callback(indata, frames, time_info, status):
+        nonlocal buffer, speech_active, silence_frames
+        if status:
+            print(status)
+        pcm16 = (indata[:, 0] * 32768).astype(np.int16)
+        is_speech = vad.is_speech(pcm16.tobytes(), SAMPLE_RATE)
+
+        if is_speech:
+            buffer = np.concatenate((buffer, indata[:, 0]))
+            speech_active = True
+            silence_frames = 0
+        elif speech_active:
+            silence_frames += 1
+            if silence_frames > max_silence_frames:
+                # End of speech
+                if len(buffer) > SAMPLE_RATE * 0.8:  # >=0.8s segment
+                    audio_queue.put(buffer.copy())
+                buffer = np.zeros(0, dtype=np.float32)
+                speech_active = False
+                silence_frames = 0
+
+    with sd.InputStream(
+        channels=1,
+        samplerate=SAMPLE_RATE,
+        callback=callback,
+        blocksize=int(SAMPLE_RATE * FRAME_DURATION / 1000),
+    ):
+        while not stop_event.is_set():
+            time.sleep(0.1)
+
+# ---------------- WHISPER THREAD ----------------
+def translator_loop():
+    """Transcribe & translate speech chunks."""
+    while not stop_event.is_set():
+        try:
+            chunk = audio_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            result = model.transcribe(
+                chunk,
+                task="translate",
+                language=None if LANGUAGE == "auto" else LANGUAGE,
+                fp16=False
+            )
+            text = result["text"].strip()
+            if text:
+                print(f"🗣️ English Translation: {text}\n")
+        except Exception as e:
+            print(f"[Transcription Error] {e}")
+
+# ---------------- START ----------------
+record_t = threading.Thread(target=record_loop, daemon=True)
+trans_t = threading.Thread(target=translator_loop, daemon=True)
+
+record_t.start()
+trans_t.start()
+
+try:
+    while True:
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    print("\n🛑 Stopping...")
+    stop_event.set()
+    record_t.join()
+    trans_t.join()
+    print("✅ Exited cleanly.")
