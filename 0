@@ -1,9 +1,11 @@
-LDFLAGS="-L$(brew --prefix portaudio)/lib" CFLAGS="-I$(brew --prefix portaudio)/include" pip install pyaudio
-
 import gradio as gr
 import numpy as np
 import whisper
 import torch
+import torchaudio
+from io import BytesIO
+import tempfile
+import os
 
 # Load Whisper base model
 whisper_model = whisper.load_model("base")
@@ -20,6 +22,9 @@ def transcribe(audio_buffer, display_text, chunk, language, silence_count):
     - Resets buffer on prolonged silence.
     - Appends only new text.
     """
+    if chunk is None:
+        return audio_buffer, display_text, silence_count
+    
     sr, data = chunk
     
     # Normalize and convert to mono float32
@@ -28,6 +33,12 @@ def transcribe(audio_buffer, display_text, chunk, language, silence_count):
     data = data.astype(np.float32)
     if np.max(np.abs(data)) > 0:
         data /= np.max(np.abs(data))
+    
+    # Resample to 16kHz if needed (prevents format issues)
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(sr, 16000)
+        data = resampler(torch.from_numpy(data).float()).numpy()
+        sr = 16000
     
     # VAD on chunk
     data_tensor = torch.from_numpy(data).float().unsqueeze(0)  # Batch dim
@@ -51,6 +62,7 @@ def transcribe(audio_buffer, display_text, chunk, language, silence_count):
         # Transcribe full voiced buffer if >1s (~16000 samples)
         if len(audio_buffer) > 16000:
             try:
+                # Ensure 16kHz for Whisper
                 result = whisper_model.transcribe(
                     audio_buffer,
                     language=lang_code,
@@ -69,7 +81,7 @@ def transcribe(audio_buffer, display_text, chunk, language, silence_count):
                 if len(audio_buffer) > 16000 * 30:
                     audio_buffer = audio_buffer[-16000 * 30:]
             except Exception as e:
-                print(f"Whisper error: {e}")  # Silent fail
+                print(f"Whisper error (skipping chunk): {e}")  # Silent fail, continue
     else:
         # Silence: increment count
         updated_silence += 1
@@ -88,7 +100,7 @@ def transcribe(audio_buffer, display_text, chunk, language, silence_count):
 # Gradio Interface
 with gr.Blocks(title="Real-Time Translator with VAD") as demo:
     gr.Markdown("# Real-Time Speech Translator (Whisper + Silero VAD)")
-    gr.Markdown("Live English translation from auto-detect/French/German. Pauses on silence for efficiency.")
+    gr.Markdown("Live English translation from auto-detect/French/German. Pauses on silence for efficiency. Click mic and speak continuously—text updates in real-time.")
     
     with gr.Row():
         language_dropdown = gr.Dropdown(
@@ -102,13 +114,13 @@ with gr.Blocks(title="Real-Time Translator with VAD") as demo:
         sources="microphone",
         type="numpy",
         streaming=True,
-        label="Speak here..."
+        label="Click and speak here (continuous listening)..."
     )
     
     output_text = gr.Textbox(
         label="English Translation (Live)",
         lines=10,
-        placeholder="Translation appears during speech...",
+        placeholder="Start speaking—translation appears live...",
         interactive=False
     )
     
@@ -117,14 +129,14 @@ with gr.Blocks(title="Real-Time Translator with VAD") as demo:
     text_state = gr.State(value="")
     silence_state = gr.State(value=0)
     
-    # Update on new chunk
+    # Update on new chunk (live streaming)
     audio_input.change(
-        transcribe,
+        fn=transcribe,
         inputs=[audio_state, text_state, audio_input, language_dropdown, silence_state],
         outputs=[audio_state, text_state, silence_state, output_text]
     )
     
-    gr.Markdown("**Notes:** Processes voiced chunks only. ~0.5-1s latency on CPU.")
+    gr.Markdown("**Tips:** Grant mic access. For real-time flow, speak clearly; updates every ~0.5s. If error persists, check FFmpeg install.")
 
 if __name__ == "__main__":
     demo.launch()
