@@ -1,35 +1,22 @@
-# File: src/mcp_agent/agents/base_agent.py
-
-import asyncio
-from ... # other imports omitted for brevity
-
-class BaseAgent(...):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._used_tools: List[str] = []  # Initialize tool log
-
-    async def generate(self, messages, **kwargs):
-        # Before generation: clear last run's tools list
-        self._used_tools = []
-
-        # Call the existing generate logic
-        multipart: PromptMessageMultipart = await super().generate(messages, **kwargs)
-
-        # Parse the content parts to identify tool calls
-        for part in multipart.content:
-            # The `part` may be a TextContent, EmbeddedResource, CallToolResult, etc.
-            try:
-                if hasattr(part, 'tool') and part.tool:
-                    tool_name = part.tool.name
-                    self._used_tools.append(tool_name)
-                # Or if it's a resource with metadata
-                elif isinstance(part, EmbeddedResource) and part.metadata and 'tool_name' in part.metadata:
-                    self._used_tools.append(part.metadata['tool_name'])
-            except Exception:
-                continue
-
-        return multipart
-
-    def get_used_tools(self) -> List[str]:
-        """Return list of tool names invoked in the last generate() call."""
-        return list(self._used_tools)
+<style>
+  body {
+    margin: 0;
+    background-color: rgba(0,255,0,1); /* solid green */
+    color: white;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 2em;
+    text-align: center;
+    display: flex;
+    justify-content: center;
+    align-items: flex-end; /* bottom-aligned captions */
+    height: 100vh;
+    padding: 10px 0; /* less padding so green screen fits */
+    overflow: hidden; /* remove scrollbars */
+  }
+  #caption {
+    width: 90%;
+    line-height: 1.4;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
+    margin-bottom: 50px; /* move captions slightly up from bottom */
+  }
+</style>
