@@ -1,1 +1,130 @@
 LDFLAGS="-L$(brew --prefix portaudio)/lib" CFLAGS="-I$(brew --prefix portaudio)/include" pip install pyaudio
+
+import gradio as gr
+import numpy as np
+import whisper
+import torch
+
+# Load Whisper base model
+whisper_model = whisper.load_model("base")
+
+# Load Silero VAD model
+vad_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=True)
+torch.set_num_threads(1)  # CPU optimization
+
+def transcribe(audio_buffer, display_text, chunk, language, silence_count):
+    """
+    Processes new audio chunk with VAD:
+    - Detects speech; appends only if voiced.
+    - Runs Whisper on full voiced buffer.
+    - Resets buffer on prolonged silence.
+    - Appends only new text.
+    """
+    sr, data = chunk
+    
+    # Normalize and convert to mono float32
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+    data = data.astype(np.float32)
+    if np.max(np.abs(data)) > 0:
+        data /= np.max(np.abs(data))
+    
+    # VAD on chunk
+    data_tensor = torch.from_numpy(data).float().unsqueeze(0)  # Batch dim
+    speech_prob = vad_model(data_tensor)[0].item()
+    
+    # Map language
+    lang_map = {"auto-detect": None, "french": "fr", "german": "de"}
+    lang_code = lang_map.get(language, None)
+    
+    new_text = ""
+    updated_silence = silence_count
+    
+    if speech_prob > 0.5:
+        # Speech detected: append to buffer and reset silence
+        updated_silence = 0
+        if audio_buffer is None:
+            audio_buffer = data
+        else:
+            audio_buffer = np.concatenate((audio_buffer, data))
+        
+        # Transcribe full voiced buffer if >1s (~16000 samples)
+        if len(audio_buffer) > 16000:
+            try:
+                result = whisper_model.transcribe(
+                    audio_buffer,
+                    language=lang_code,
+                    task="translate",
+                    fp16=False  # CPU-safe
+                )
+                full_transcript = result["text"].strip()
+                
+                # Diff for new text only
+                if display_text and full_transcript.startswith(display_text):
+                    new_text = full_transcript[len(display_text):].strip()
+                else:
+                    new_text = full_transcript
+                
+                # Keep buffer for context (trim to last 30s to manage memory)
+                if len(audio_buffer) > 16000 * 30:
+                    audio_buffer = audio_buffer[-16000 * 30:]
+            except Exception as e:
+                print(f"Whisper error: {e}")  # Silent fail
+    else:
+        # Silence: increment count
+        updated_silence += 1
+        if updated_silence > 5:  # ~2.5s silence at 0.5s chunks
+            audio_buffer = None
+            updated_silence = 0
+    
+    # Append new text
+    if new_text:
+        updated_display = (display_text + (" " if display_text else "") + new_text).strip()
+    else:
+        updated_display = display_text
+    
+    return audio_buffer, updated_display, updated_silence
+
+# Gradio Interface
+with gr.Blocks(title="Real-Time Translator with VAD") as demo:
+    gr.Markdown("# Real-Time Speech Translator (Whisper + Silero VAD)")
+    gr.Markdown("Live English translation from auto-detect/French/German. Pauses on silence for efficiency.")
+    
+    with gr.Row():
+        language_dropdown = gr.Dropdown(
+            choices=["auto-detect", "french", "german"],
+            value="auto-detect",
+            label="Source Language",
+            interactive=True
+        )
+    
+    audio_input = gr.Audio(
+        sources="microphone",
+        type="numpy",
+        streaming=True,
+        label="Speak here..."
+    )
+    
+    output_text = gr.Textbox(
+        label="English Translation (Live)",
+        lines=10,
+        placeholder="Translation appears during speech...",
+        interactive=False
+    )
+    
+    # Hidden states
+    audio_state = gr.State(value=None)
+    text_state = gr.State(value="")
+    silence_state = gr.State(value=0)
+    
+    # Update on new chunk
+    audio_input.change(
+        transcribe,
+        inputs=[audio_state, text_state, audio_input, language_dropdown, silence_state],
+        outputs=[audio_state, text_state, silence_state, output_text]
+    )
+    
+    gr.Markdown("**Notes:** Processes voiced chunks only. ~0.5-1s latency on CPU.")
+
+if __name__ == "__main__":
+    demo.launch()
